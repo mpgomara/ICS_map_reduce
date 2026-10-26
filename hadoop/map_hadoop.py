@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 
-import sys
+import re, sys
 
-# input comes from STDIN (standard input)
+pair = re.compile(r'"(\w+)"\s*:\s*"(.*?)"')
+rec = {}
+
+def num(s):
+    return float(s)
+
 for line in sys.stdin:
-    # remove leading and trailing whitespace
-    line = line.strip()
-    # split the line into words
-    words = line.split()
-    # increase counters
-    for word in words:
-        # write the results to STDOUT (standard output);
-        # what we output here will be the input for the
-        # Reduce step, i.e. the input for reducer.py
-        #
-        # tab-delimited; the trivial word count is 1
-        print('%s\t%s' % (word, 1))
+    m = pair.search(line)
+    if m:
+        rec[m.group(1)] = m.group(2)
+    if "}" in line:                         # fin de registro
+        if rec:
+            tmax, tmin = num(rec.get("TMAX")), num(rec.get("TMIN"))
+            name = rec.get("NAME", rec.get("STATION", "?"))
+            if tmax is not None or tmin is not None:
+                print('{0}\t{1}\t{2}\t{3}'.format(
+                    name,
+                    "" if tmax is None else tmax,
+                    "" if tmin is None else tmin,
+                    rec.get("DATE", "")))
+        rec = {}

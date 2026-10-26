@@ -1,38 +1,19 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 import sys
+from itertools import groupby
 
-current_word = None
-current_count = 0
-word = None
+def parse(line):
+    name, tmax, tmin, date = line.rstrip("\n").split("\t")
+    return name, (float(tmax) if tmax else None), (float(tmin) if tmin else None), date
 
-# input comes from STDIN
-for line in sys.stdin:
-    # remove leading and trailing whitespace
-    line = line.strip()
-
-    # parse the input we got from mapper.py
-    word, count = line.split('\t', 1)
-
-    # convert count (currently a string) to int
-    try:
-        count = int(count)
-    except ValueError:
-        # count was not a number, so silently
-        # ignore/discard this line
-        continue
-
-    # this IF-switch only works because Hadoop sorts map output
-    # by key (here: word) before it is passed to the reducer
-    if current_word == word:
-        current_count += count
-    else:
-        if current_word:
-            # write result to STDOUT
-            print('%s\t%s' % (current_word, current_count))
-        current_count = count
-        current_word = word
-
-# do not forget to output the last word if needed!
-if current_word is not None:
-    print('%s\t%s' % (current_word, current_count))
+rows = (parse(l) for l in sys.stdin if l.strip())
+for name, grp in groupby(rows, key=lambda r: r[0]):
+    best_max = (None, "")
+    best_min = (None, "")
+    for _, tmax, tmin, date in grp:
+        if tmax is not None and (best_max[0] is None or tmax > best_max[0]):
+            best_max = (tmax, date)
+        if tmin is not None and (best_min[0] is None or tmin < best_min[0]):
+            best_min = (tmin, date)
+    print("%s\t%s\t%s\t%s\t%s" % (name, best_max[0], best_max[1], best_min[0], best_min[1]))
