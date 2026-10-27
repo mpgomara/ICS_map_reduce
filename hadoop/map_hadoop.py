@@ -6,7 +6,7 @@ pair = re.compile(r'"(\w+)"\s*:\s*"(.*?)"')
 rec = {}
 
 def num(s):
-    return float(s)
+    return float(s) if s is not None else None
 
 for line in sys.stdin:
     m = pair.search(line)
