@@ -1,0 +1,162 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{microtype}
+
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    breaklines=true,
+    frame=single,
+    columns=fullflexible,
+    showstringspaces=false
+}
+
+\title{Memoria: Procesamiento de datos meteorológicos con MapReduce\\
+\large Apache Hadoop y Apache Spark}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Apache Hadoop}
+
+\subsection{Preparación}
+
+Todo lo necesario para esta parte (datos de entrada y scripts de mapper/reducer) está contenido en la carpeta \texttt{ics\_map\_reduce/}. Lo primero es copiar esa carpeta \textbf{entera} dentro del contenedor \texttt{namenode} del clúster Hadoop, en lugar de copiar los ficheros uno a uno:
+
+\begin{lstlisting}
+docker compose cp ics_map_reduce namenode:/tmp/ics_map_reduce
+\end{lstlisting}
+
+Este comando copia de golpe todo el contenido del proyecto (datos meteorológicos y scripts) dentro del contenedor, en \texttt{/tmp/ics\_map\_reduce}. A partir de aquí, todos los comandos siguientes se ejecutan dentro del contenedor y hacen referencia a los ficheros usando rutas \textbf{relativas} a esa copia, sin necesidad de volver a copiar nada.
+
+Nota: los mappers y reducers están escritos en Python 3. La imagen Docker del clúster se ha extendido (ver \texttt{Dockerfile} del proyecto) para instalar Python 3 sobre la imagen base \texttt{apache/hadoop:3}, que originalmente solo traía Python 2.
+
+\subsection{Pasos}
+
+\begin{enumerate}
+
+\item \textbf{Esperar a que HDFS salga del modo seguro} (justo después de levantar el clúster con \texttt{just up}):
+\begin{lstlisting}
+docker compose exec -T namenode hdfs dfsadmin -safemode wait
+\end{lstlisting}
+Al arrancar, el \texttt{namenode} entra en \emph{safe mode} mientras recibe los informes de bloques de los cuatro \texttt{datanode}; en ese estado HDFS es de solo lectura y no admite escrituras. Este comando se queda esperando hasta que el clúster sale del modo seguro, momento en el que ya se pueden subir datos.
+
+\item \textbf{Crear el directorio de usuario en HDFS} (una sola vez):
+\begin{lstlisting}
+docker compose exec -T namenode hdfs dfs -mkdir -p /ics2026ms
+\end{lstlisting}
+Es el directorio dentro del sistema de ficheros distribuido (HDFS) donde se guardarán los datos de entrada y los resultados de este usuario.
+
+\item \textbf{Subir los datos de entrada a HDFS}, usando la ruta relativa a la copia hecha en el paso anterior:
+\begin{lstlisting}
+docker compose exec -T namenode hdfs dfs -mkdir -p /ics2026ms/datos_216_estaciones
+
+docker compose exec -T namenode bash -c "hdfs dfs -put -f /tmp/ics_map_reduce/datos/datos_216_estaciones/* /ics2026ms/datos_216_estaciones/"
+\end{lstlisting}
+Sube los ficheros JSON de las estaciones meteorológicas desde la copia local dentro del contenedor hacia HDFS, que es el sistema de ficheros distribuido desde el que los distintos nodos del clúster leerán los datos en paralelo.
+
+\item \textbf{Lanzar el job de streaming de Hadoop}, apuntando el mapper y el reducer directamente a la carpeta copiada:
+\begin{lstlisting}
+docker compose exec -T namenode bash -c "hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-*.jar \
+    -files /tmp/ics_map_reduce/hadoop/map_hadoop.py,/tmp/ics_map_reduce/hadoop/reduce_hadoop.py \
+    -mapper 'python3 map_hadoop.py' -reducer 'python3 reduce_hadoop.py' \
+    -input /ics2026ms/datos_216_estaciones -output /ics2026ms/salida"
+\end{lstlisting}
+
+Significado de cada opción:
+\begin{itemize}
+    \item \texttt{hadoop jar .../hadoop-streaming-*.jar}: invoca el framework \emph{Hadoop Streaming}, que permite escribir el mapper y el reducer en cualquier lenguaje (aquí Python) en vez de Java, comunicándose por stdin/stdout.
+    \item \texttt{-files}: distribuye los dos scripts a todos los nodos (\emph{nodemanagers}) que vayan a ejecutar tareas, ya que el procesamiento real no ocurre en el \texttt{namenode}.
+    \item \texttt{-mapper}: comando que se ejecuta en la fase \emph{map}; lee líneas de la entrada por stdin y extrae de cada registro JSON el nombre de estación, \texttt{TMAX}, \texttt{TMIN} y fecha.
+    \item \texttt{-reducer}: comando que se ejecuta en la fase \emph{reduce}; recibe las salidas de los mappers ya agrupadas y ordenadas por clave (estación) y calcula la temperatura máxima y mínima de cada una.
+    \item \texttt{-input} / \texttt{-output}: rutas en HDFS de los datos de entrada y del directorio donde se escribirá el resultado (este último no debe existir previamente).
+\end{itemize}
+
+\item \textbf{Consultar el resultado}:
+\begin{lstlisting}
+docker compose exec -T namenode hdfs dfs -ls /ics2026ms/salida
+docker compose exec -T namenode hdfs dfs -cat /ics2026ms/salida/part-00000
+\end{lstlisting}
+Hadoop Streaming usa la API antigua de MapReduce, por lo que el fichero de salida se llama \texttt{part-00000} (sin el sufijo \texttt{-r-} que usa la API nueva).
+
+\end{enumerate}
+
+\subsection{Escalado (opcional)}
+
+El número de \emph{reducers} no depende del número de nodos del clúster; por defecto es 1 y se fuerza explícitamente con una opción genérica:
+
+\begin{lstlisting}
+docker compose exec -T namenode bash -c "hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-*.jar \
+    -D mapreduce.job.reduces=4 \
+    -files /tmp/ics_map_reduce/hadoop/map_hadoop.py,/tmp/ics_map_reduce/hadoop/reduce_hadoop.py \
+    -mapper 'python3 map_hadoop.py' -reducer 'python3 reduce_hadoop.py' \
+    -input /ics2026ms/datos_216_estaciones -output /ics2026ms/salida"
+\end{lstlisting}
+
+El número de \emph{mappers} tampoco se fija a mano: depende de cuántos \emph{splits} genera el formato de entrada. Con muchos ficheros pequeños (p.~ej. 216 ficheros de datos JSON) Hadoop crea por defecto un split por fichero, generando muchas tareas diminutas. Para combinarlos en menos mappers se usa \texttt{CombineTextInputFormat} junto con un tamaño máximo de split:
+
+\begin{lstlisting}
+docker compose exec -T namenode bash -c "hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-*.jar \
+    -D mapreduce.job.reduces=4 \
+    -D mapreduce.input.fileinputformat.split.maxsize=3200000 \
+    -files /tmp/ics_map_reduce/hadoop/map_hadoop.py,/tmp/ics_map_reduce/hadoop/reduce_hadoop.py \
+    -inputformat org.apache.hadoop.mapred.lib.CombineTextInputFormat \
+    -mapper 'python3 map_hadoop.py' -reducer 'python3 reduce_hadoop.py' \
+    -input /ics2026ms/datos_216_estaciones -output /ics2026ms/salida"
+\end{lstlisting}
+
+Importante: las opciones genéricas (\texttt{-D}, \texttt{-files}) deben ir siempre antes que las opciones propias de streaming (\texttt{-inputformat}, \texttt{-mapper}, \texttt{-reducer}, \texttt{-input}, \texttt{-output}); si se invierte el orden, el parser deja de reconocer las opciones genéricas y el job falla.
+
+\section{Apache Spark}
+
+\subsection{Requisitos}
+
+Se necesita tener instalado \texttt{pyspark} en el entorno desde el que se va a lanzar el job:
+
+\begin{lstlisting}
+pip install pyspark
+\end{lstlisting}
+
+El comando \texttt{spark-submit} (incluido con \texttt{pyspark}) permite ejecutar el script directamente, sin necesidad de un clúster Hadoop en marcha.
+
+\subsection{Pasos}
+
+\begin{enumerate}
+
+\item \textbf{Script de partida}: \texttt{ics\_map\_reduce/spark/map\_reduce\_temp.py}. Este script:
+\begin{itemize}
+    \item En la fase \emph{map}, usa \texttt{sc.wholeTextFiles(sys.argv[1])} para leer cada fichero JSON de la carpeta de datos brutos como un par (ruta, contenido completo), y un \texttt{flatMap} que recorre cada registro del array JSON, descarta los que no tengan \texttt{TMAX}/\texttt{TMIN} válidos, y emite pares \texttt{(nombre\_estación, (tmax, fecha, tmin, fecha))}.
+    \item En la fase \emph{reduce}, usa \texttt{reduceByKey} con \texttt{numPartitions=2} (dos particiones, equivalentes a dos reducers de Hadoop) para quedarse, por estación, con la temperatura máxima y la mínima.
+    \item Escribe el resultado de cada partición en un fichero (\texttt{part-00000.txt}, \texttt{part-00001.txt}), y un resumen final con la estación más calurosa y la más fría, dentro de \texttt{ics\_map\_reduce/\allowbreak spark/\allowbreak resultados\_temperaturas/}.
+\end{itemize}
+
+\item \textbf{Ejecutar el script}, pasándole como argumento la carpeta con los datos brutos (los mismos ficheros JSON de estaciones meteorológicas usados en la parte de Hadoop):
+\begin{lstlisting}
+spark-submit ics_map_reduce/spark/map_reduce_temp.py ics_map_reduce/datos/datos_4_estaciones
+\end{lstlisting}
+El argumento \texttt{sys.argv[1]} es la ruta (local) a la carpeta de datos; Spark la recorre entera, leyendo cada fichero JSON como un registro completo.
+
+\item \textbf{Consultar el resultado}, generado localmente junto al script:
+\begin{lstlisting}
+cat ics_map_reduce/spark/resultados_temperaturas/part-00000.txt
+cat ics_map_reduce/spark/resultados_temperaturas/part-00001.txt
+cat ics_map_reduce/spark/resultados_temperaturas/resumen.txt
+\end{lstlisting}
+Los dos primeros ficheros contienen el resultado de cada una de las dos particiones/reducers (estación, temperatura máxima y fecha, temperatura mínima y fecha). El fichero \texttt{resumen.txt} indica la estación con la temperatura más alta y la más baja de todo el conjunto de datos.
+
+\end{enumerate}
+
+\end{document}
