@@ -1,4 +1,5 @@
 import sys, json
+from pathlib import Path
 from pyspark import SparkContext
 
 sc = SparkContext(appName="temperaturas_mapreduce")
@@ -29,15 +30,26 @@ por_estacion = (sc.wholeTextFiles(sys.argv[1])
                   .reduceByKey(reducer, numPartitions=2))
 
 # Resultados parciales de cada "reducer" (equivalente a part-00000 y part-00001)
+directorio_salida = Path(__file__).resolve().parent / "resultados_temperaturas"
+directorio_salida.mkdir(parents=True, exist_ok=True)
+
 for i, parte in enumerate(por_estacion.glom().collect()):
-    print("--- part-0000%d ---" % i)
+    lineas = ["--- part-0000%d ---" % i]
     for name, (tmax, dmax, tmin, dmin) in sorted(parte):
-        print("%s\t%s\t%s\t%s\t%s" % (name, tmax, dmax, tmin, dmin))
+        lineas.append("%s\t%s\t%s\t%s\t%s" % (name, tmax, dmax, tmin, dmin))
+    (directorio_salida / ("part-0000%d.txt" % i)).write_text(
+        "\n".join(lineas) + "\n", encoding="utf-8"
+    )
 
 # ---------- PASO FINAL (equivalente a combinar.py) ----------
 calor = por_estacion.reduce(lambda a, b: a if a[1][0] >= b[1][0] else b)
 frio  = por_estacion.reduce(lambda a, b: a if a[1][2] <= b[1][2] else b)
-print("Más calor: %s -> %s °C (%s)" % (calor[0], calor[1][0], calor[1][1]))
-print("Más frío:  %s -> %s °C (%s)" % (frio[0], frio[1][2], frio[1][3]))
+resumen = [
+    "Más calor: %s -> %s °C (%s)" % (calor[0], calor[1][0], calor[1][1]),
+    "Más frío:  %s -> %s °C (%s)" % (frio[0], frio[1][2], frio[1][3]),
+]
+(directorio_salida / "resumen.txt").write_text(
+    "\n".join(resumen) + "\n", encoding="utf-8"
+)
 
 sc.stop()
